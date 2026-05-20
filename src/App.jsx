@@ -1,281 +1,371 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { Preferences } from '@capacitor/preferences';
-import { LocalNotifications } from '@capacitor/local-notifications';
-import { CapacitorHttp, Capacitor } from '@capacitor/core';
-import { App as AppLauncher } from '@capacitor/app';
 import Swal from 'sweetalert2';
 
-// استيراد المكونات الأساسية للنظام
+// استيراد أداة الاتصال الأصلية للهواتف الذكية من كاباسيتور
+import { CapacitorHttp } from '@capacitor/core';
+
+// استيراد الروابط والمحرك الموحد من المسار المطلوب
+import apiService, { apiEndpoints } from './services/db';
+
+// استيراد دالة تشغيل الاتصال الخارجي من المسار المطلوب
+import { executeExternalConnection } from './services/db';
+
+// استيراد المكونات المتوافقة مع ملفات النظام الفعلي لنظام Maamoul
 import Dashboard from './components/Dashboard';
+import PurchasesManager from './components/PurchasesManager';
+import Sales from './components/Sales';
+import Waste from './components/Waste';
+import Expenses from './components/Expenses';
+import Suppliers from './components/Suppliers';
+import Financials from './components/Financials';
+import Reports from './components/Reports';
+import Customers from './components/Customers';
 import Inventory from './components/Inventory';
 import ProductionManager from './components/ProductionManager';
+import StaffManagement from './components/StaffManagement';
+import Settings from './components/Settings';
 
-// إعدادات الروابط الموحدة لنظام معمول ERP
-const API_CONFIG = {
-  SYNC: 'https://maamoul-one.vercel.app/api/sync',
-  GET: 'https://maamoul-one.vercel.app/api/get-data',
-  DELETE: 'https://maamoul-one.vercel.app/api/delete-item'
+import './App.css';
+
+const showSwal = (title, icon = 'success') => {
+  Swal.fire({ title, icon, timer: 1800, showConfirmButton: false, position: 'center', toast: true });
 };
+
+// مصفوفة الموديولات لإدارة التخزين المحلي والربط المتكامل - تم إضافة الموديولات الناقصة لضمان شمولية الحفظ
+const SYNC_MODULES = [
+  { key: 'stock', module: 'inventory_module' },
+  { key: 'salesData', module: 'sales_module' },
+  { key: 'inventory', module: 'purchases_module' },
+  { key: 'productionData', module: 'manufacturing_module' },
+  { key: 'expenses', module: 'dashboard_module' },
+  { key: 'customers', module: 'customers_module' },
+  { key: 'suppliers', module: 'suppliers_module' },
+  { key: 'staff', module: 'staff_module' },
+  { key: 'waste', module: 'waste_module' },
+  { key: 'cashBook', module: 'financials_module' }
+];
 
 const App = () => {
   const [activePage, setActivePage] = useState('dashboard');
-  const [stock, setStock] = useState([]);
-  const [productionHistory, setProductionHistory] = useState([]);
+  const [isInitialLoading, setIsInitialLoading] = useState(true);
   const [isSyncing, setIsSyncing] = useState(false);
 
-  // --- 1. المحرك المحلي (Offline-First Engine) ---
-  const storage = {
-    save: async (key, data) => {
-      await Preferences.set({ key, value: JSON.stringify(data) });
-      localStorage.setItem(key, JSON.stringify(data)); 
-    },
-    load: async (key) => {
-      const { value } = await Preferences.get({ key });
-      try {
-        return value ? JSON.parse(value) : JSON.parse(localStorage.getItem(key) || 'null');
-      } catch (e) {
-        return null;
-      }
-    }
-  };
-
-  // --- ميزة تفعيل أزرار الهاتف ---
-  useEffect(() => {
-    const backHandler = AppLauncher.addListener('backButton', () => {
-      if (activePage === 'dashboard') {
-        AppLauncher.exitApp();
-      } else {
-        setActivePage('dashboard');
-      }
-    });
-    return () => { backHandler.then(h => h.remove()); };
-  }, [activePage]);
-
-  // --- دالة مساعدة لتجميع الأصناف (Helper Function) ---
-  const groupItems = (items) => {
-    const grouped = new Map();
-    items.forEach(item => {
-      const name = (item.name || item.item || "صنف غير مسمى").trim();
-      const balance = parseFloat(item.balance || item.quantity || 0);
-      const price = parseFloat(item.price || 0);
-
-      if (grouped.has(name)) {
-        const existing = grouped.get(name);
-        existing.balance += balance;
-        if (price > 0) existing.price = price; 
-      } else {
-        grouped.set(name, {
-          ...item,
-          id: item.id || item._id || Date.now() + Math.random(),
-          name: name,
-          balance: balance,
-          price: price
-        });
-      }
-    });
-    return Array.from(grouped.values());
-  };
-
-  // --- 2. نظام المزامنة والتوحيد ---
-  const fetchCloudData = useCallback(async () => {
+  // دالة مساعدة معالجة ومضمونة لتحميل البيانات محلياً فوراً لمنع ظهور شاشات بيضاء
+  const loadInitial = (key, initialValue) => {
     try {
-      const resProd = await CapacitorHttp.get({ url: `${API_CONFIG.GET}?collectionName=productionData` });
-      let prodResponse = typeof resProd.data === 'string' ? JSON.parse(resProd.data) : resProd.data;
-      if (prodResponse?.success && prodResponse.data) {
-        setProductionHistory(prodResponse.data);
-        await storage.save('productionHistory', prodResponse.data);
-      }
+      const saved = localStorage.getItem(key);
+      return saved ? JSON.parse(saved) : initialValue;
+    } catch (e) { return initialValue; }
+  };
 
-      const resStock = await CapacitorHttp.get({ url: `${API_CONFIG.GET}?collectionName=stock` });
-      let stockResponse = typeof resStock.data === 'string' ? JSON.parse(resStock.data) : resStock.data;
-      
-      const rawItems = stockResponse.data || [];
+  // --- States لإدارة البيانات محلياً في الواجهة لمشروع Maamoul ERP ---
+  const [stock, setStock] = useState(() => loadInitial('stock', []));
+  const [salesData, setSalesData] = useState(() => loadInitial('salesData', []));
+  const [inventory, setInventory] = useState(() => loadInitial('inventory', []));
+  const [expenses, setExpenses] = useState(() => loadInitial('expenses', []));
+  const [waste, setWaste] = useState(() => loadInitial('waste', []));
+  const [suppliers, setSuppliers] = useState(() => loadInitial('suppliers', []));
+  const [customers, setCustomers] = useState(() => loadInitial('customers', []));
+  const [productionData, setProductionData] = useState(() => loadInitial('productionData', []));
+  const [supplierWaitingList, setSupplierWaitingList] = useState(() => loadInitial('waitingList', []));
+  const [cashBook, setCashBook] = useState(() => loadInitial('cashBook', []));
+  const [staff, setStaff] = useState(() => loadInitial('staff', []));
 
-      if (stockResponse?.success && Array.isArray(rawItems)) {
-        const normalizedStock = groupItems(rawItems);
-        setStock(normalizedStock);
-        await storage.save('stock', normalizedStock);
-      }
-    } catch (error) {
-      console.warn("ERP Alert: جاري العمل بالبيانات المحلية.");
-    }
+  // تجميع الـ Setters في كائن لتسهيل المزامنة الذكية الديناميكية
+  const setters = useMemo(() => ({
+    stock: setStock, salesData: setSalesData, inventory: setInventory,
+    expenses: setExpenses, waste: setWaste, suppliers: setSuppliers,
+    customers: setCustomers, productionData: setProductionData,
+    waitingList: setSupplierWaitingList, cashBook: setCashBook, staff: setStaff
+  }), []);
+
+  // دالة موحدة للحفظ المحلي الآمن لحماية البيانات من الاستبدال الفارغ
+  const saveLocally = useCallback((key, data) => {
+    localStorage.setItem(key, JSON.stringify(data));
   }, []);
 
-  const syncData = async (collection, data) => {
-    if (!data || data.length === 0) return;
-    setIsSyncing(true);
+  // 1. 📥 محرك جلب البيانات السحابي الآمن والمنظم
+  const downloadDataFromMaamoulCloud = useCallback(async () => {
     try {
-      await CapacitorHttp.post({
-        url: API_CONFIG.SYNC,
-        headers: { 'Content-Type': 'application/json' },
-        data: { collectionName: collection, data }
-      });
-    } catch (error) {
-      console.error("Sync Error:", error);
-    } finally {
-      setIsSyncing(false);
-    }
-  };
+      let importedCount = 0;
 
-  // --- دالة حفظ الإنتاج الجديد (تم الضبط لضمان المزامنة النهائية) ---
-  const handleSaveProduction = async (newProduction) => {
-    // 1. تحديث سجل الإنتاج
-    const updatedHistory = [newProduction, ...productionHistory];
-    setProductionHistory(updatedHistory);
-    await storage.save('productionHistory', updatedHistory);
-    
-    // 2. تحديث المخزن المحدث بالفعل من ProductionManager
-    // ملاحظة: الـ stock هنا سيأتي مخصوماً وجاهزاً لأننا نمرر setStock للـ ProductionManager
-    await storage.save('stock', stock);
+      for (const item of SYNC_MODULES) {
+        const cloudUrl = `https://maamoul-pro-five.vercel.app/api/get-data?module_name=${item.module}&record_id=${item.key}_records&t=${new Date().getTime()}`;
 
-    // 3. مزامنة البيانات (السجل الجديد + حالة المخزن النهائية)
-    await syncData('productionData', [newProduction]);
-    await syncData('stock', stock);
-    
-    Swal.fire('تم الحفظ', 'تم تسجيل الإنتاج وتحديث المخزن بنجاح', 'success');
-  };
+        const options = {
+          url: cloudUrl,
+          method: 'GET',
+          headers: { 
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'Pragma': 'no-cache',
+            'Accept': 'application/json'
+          }
+        };
 
-  const handleSaveInventory = async (newItem) => {
-    const formattedItem = {
-      ...newItem,
-      name: newItem.name || newItem.item,
-      balance: parseFloat(newItem.balance || newItem.quantity || 0),
-      price: parseFloat(newItem.price || 0)
-    };
+        const response = await CapacitorHttp.get(options);
 
-    const updatedStock = groupItems([...stock, formattedItem]);
-    
-    setStock(updatedStock);
-    await storage.save('stock', updatedStock);
-    await syncData('stock', updatedStock);
-  };
+        if (response.status === 200 && response.data) {
+          let cloudRecords = response.data;
+          
+          if (typeof cloudRecords === 'string') {
+            try { cloudRecords = JSON.parse(cloudRecords); } catch (e) { console.error("🚨 خطأ موديول: " + item.key, e); }
+          }
 
-  // --- دالة الحذف المعدلة للحذف اللحظي ---
-  const handleDelete = async (id, type) => {
-    if (type === 'stock') {
-      const updatedStock = stock.filter(item => (item.id !== id && item._id !== id));
-      setStock(updatedStock);
-      await storage.save('stock', updatedStock);
-      
-      try {
-        await CapacitorHttp.post({
-          url: API_CONFIG.DELETE,
-          headers: { 'Content-Type': 'application/json' },
-          data: { collectionName: 'stock', id }
-        });
-      } catch (e) {
-        console.error("فشل الحذف من السيرفر.");
+          if (cloudRecords && typeof cloudRecords === 'object' && !Array.isArray(cloudRecords)) {
+            cloudRecords = cloudRecords.data || cloudRecords.payload || cloudRecords.records || Object.values(cloudRecords)[0] || [];
+          }
+
+          if (Array.isArray(cloudRecords) && cloudRecords.length > 0) {
+            if (setters[item.key]) {
+              setters[item.key](cloudRecords);
+              localStorage.setItem(item.key, JSON.stringify(cloudRecords)); 
+              importedCount++;
+            }
+          }
+        }
       }
-    } else {
-      const updatedHistory = productionHistory.filter(item => (item.id !== id && item._id !== id));
-      setProductionHistory(updatedHistory);
-      await storage.save('productionHistory', updatedHistory);
 
-      try {
-        await CapacitorHttp.post({
-          url: API_CONFIG.DELETE,
-          headers: { 'Content-Type': 'application/json' },
-          data: { collectionName: 'productionData', id }
-        });
-      } catch (e) {
-        console.error("فشل الحذف من السيرفر.");
+      setIsInitialLoading(false);
+      if (importedCount > 0) {
+        showSwal('تم استعادة وتحديث سجلات النظام بنجاح!', 'success');
       }
+    } catch (err) {
+      console.error("🚨 Cloud Download Error:", err);
+      setIsInitialLoading(false);
     }
-  };
+  }, [setters]);
 
-  // --- 3. دورة حياة النظام ---
+  // تشغيل محرك الجلب الأساسي عند إقلاع التطبيق لأول مرة فقط
   useEffect(() => {
-    const bootSystem = async () => {
-      if (Capacitor.isNativePlatform()) {
-        await LocalNotifications.requestPermissions();
+    downloadDataFromMaamoulCloud();
+  }, [downloadDataFromMaamoulCloud]);
+
+  // 2. 📤 محرك المزامنة الخلفية التلقائي والذكي المعدّل
+  useEffect(() => {
+    if (isInitialLoading) return;
+
+    const runBackgroundSyncToMaamoul = async () => {
+      setIsSyncing(true);
+      try {
+        const liveDataMap = {
+          stock,
+          salesData,
+          inventory,
+          productionData,
+          expenses,
+          customers,
+          suppliers,
+          staff,
+          waste,
+          cashBook
+        };
+
+        for (const item of SYNC_MODULES) {
+          const currentLiveData = liveDataMap[item.key];
+          
+          if (Array.isArray(currentLiveData) && currentLiveData.length > 0) {
+            const saveOptions = {
+              url: 'https://maamoul-pro-five.vercel.app/api/sync',
+              method: 'POST',
+              headers: { 
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+              },
+              data: {
+                module_name: item.module,
+                record_id: `${item.key}_records`,
+                jsondata: currentLiveData  
+              }
+            };
+            await CapacitorHttp.post(saveOptions);
+          }
+        }
+      } catch (err) {
+        console.error("🚨 Cloud Save Sync Error:", err);
+      } finally {
+        setIsSyncing(false);
       }
-      const localStock = await storage.load('stock');
-      const localHistory = await storage.load('productionHistory');
-      if (localStock) setStock(localStock);
-      if (localHistory) setProductionHistory(localHistory);
+    };
+
+    const initialTimer = setTimeout(runBackgroundSyncToMaamoul, 3000);
+    const interval = setInterval(runBackgroundSyncToMaamoul, 60000);
+
+    return () => {
+      clearTimeout(initialTimer);
+      clearInterval(interval);
+    };
+  }, [stock, salesData, inventory, productionData, expenses, customers, suppliers, staff, waste, cashBook, isInitialLoading]);
+
+  // 🎯 دالة الحذف السحابية المعدلة لتجنب خطأ 400
+  const deleteCloudData = async (moduleName, recordId) => {
+    try {
+      const deleteUrl = `https://maamoul-pro-five.vercel.app/api/delete-item?module_name=${moduleName}&record_id=${recordId}_records`;
+
+      const options = {
+        url: deleteUrl,
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' }
+      };
+
+      const response = await CapacitorHttp.delete(options);
+      return response.status === 200;
+    } catch (err) {
+      console.error("🚨 Cloud Delete Error:", err);
+      return false;
+    }
+  };
+
+  // 🤖 دالة معالجة وتحليل الأداء والتقارير عبر محرك الذكاء الاصطناعي (raqqa-ai)
+  const analyzeSystemPerformanceWithAI = async (analysisPrompt) => {
+    try {
+      const options = {
+        url: 'https://maamoul-pro-five.vercel.app/api/raqqa-ai',
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        data: {
+          prompt: analysisPrompt,
+          systemSnapshot: { financialStats, currentStockCount: stock.length }
+        }
+      };
+      const response = await CapacitorHttp.post(options);
+      return response.data;
+    } catch (err) {
+      console.error("🚨 AI Engine Error:", err);
+      return null;
+    }
+  };
+
+  // --- العمليات والتحليلات الحسابية الكلية للوحة التحكم ---
+  const financialStats = useMemo(() => {
+    const totalIncome = salesData.reduce((sum, s) => sum + (parseFloat(s.total) || 0), 0);
+    const totalExp = expenses.reduce((sum, e) => sum + (parseFloat(e.amount) || 0), 0);
+    const totalPurchasesCash = inventory.filter(p => p.paymentMethod === 'كاش' || p.paymentType === 'كاش').reduce((sum, p) => sum + (parseFloat(p.total) || 0), 0);
+    const cashBalance = totalIncome - (totalExp + totalPurchasesCash);
+    const stockValue = stock.reduce((sum, item) => sum + ((parseFloat(item.balance) || 0) * (parseFloat(item.price) || 0)), 0);
+
+    return { totalIncome, totalExpenses: totalExp, cashBalance, netProfit: totalIncome - totalExp - totalPurchasesCash, stockValue };
+  }, [salesData, expenses, inventory, stock]);
+
+  // دالة معالجة وحفظ المشتريات وتحديث المخزون الفوري محلياً وسحابياً
+  const handleSavePurchase = (p) => {
+    setInventory(prev => {
+      const next = [...prev, p];
+      saveLocally('inventory', next);
+      return next;
+    });
+
+    setStock(prev => {
+      const idx = prev.findIndex(s => s.name === p.item || s.name === p.itemName);
+      let nextStock = [...prev];
+      if (idx > -1) {
+        nextStock[idx] = { ...nextStock[idx], balance: (nextStock[idx].balance || 0) + parseFloat(p.quantity || p.qty || 0) };
+      } else {
+        nextStock.push({ id: Date.now(), name: p.item || p.itemName, balance: parseFloat(p.quantity || p.qty || 0), price: parseFloat(p.price || 0) });
+      }
+      saveLocally('stock', nextStock);
+      return nextStock;
+    });
+    showSwal('تم حفظ المادة وتحديث المخزن');
+  };
+
+  // حلقة الحفظ التلقائي في التخزين المحلي لكل الحالات
+  useEffect(() => {
+    if (isInitialLoading) return;
+    saveLocally('stock', stock);
+    saveLocally('salesData', salesData);
+    saveLocally('inventory', inventory);
+    saveLocally('productionData', productionData);
+    saveLocally('expenses', expenses);
+    saveLocally('customers', customers);
+    saveLocally('suppliers', suppliers);
+    saveLocally('staff', staff);
+    saveLocally('waitingList', supplierWaitingList);
+    saveLocally('cashBook', cashBook);
+    saveLocally('waste', waste);
+  }, [stock, salesData, inventory, productionData, expenses, customers, suppliers, staff, supplierWaitingList, cashBook, waste, isInitialLoading, saveLocally]);
+
+  // --- محرك عرض الشاشات والواجهات الفرعية وتوزيع الـ Setters بشكل كامل لمنع الفقدان ---
+  const renderPage = () => {
+    const props = { 
+      onBack: () => setActivePage('dashboard'), 
+      stock, inventory, salesData, expenses, waste, suppliers, customers, staff, cashBook, supplierWaitingList,
+      setStock, setInventory, setSalesData, setExpenses, setWaste, setSuppliers, setCustomers, setStaff, setCashBook,
+      deleteCloudData, analyzeSystemPerformanceWithAI
+    };
+    
+    switch (activePage) {
+      case 'dashboard': 
+        return <Dashboard setActivePage={setActivePage} stats={financialStats} staffCount={staff.length} />;
       
-      await fetchCloudData();
-    };
-    bootSystem();
-  }, [fetchCloudData]);
-
-  const stats = useMemo(() => {
-    const totalProduction = productionHistory.reduce((s, p) => s + (parseFloat(p.totalActualCost) || 0), 0);
-    return {
-      totalItems: stock.length,
-      lowStock: stock.filter(i => (parseFloat(i.balance) || 0) < 5).length,
-      inventoryWorth: stock.reduce((s, i) => s + ((parseFloat(i.balance) || 0) * (parseFloat(i.price) || 0)), 0).toFixed(2),
-      rawFinancialValue: totalProduction
-    };
-  }, [stock, productionHistory]);
-
-  // --- 4. توجيه الصفحات ---
-  const pages = {
-    dashboard: (
-      <Dashboard 
-        setActivePage={setActivePage} 
-        productionHistory={productionHistory} 
-        stock={stock} 
-        stats={stats}
-        onDeleteItem={handleDelete}
-        fetchData={fetchCloudData}
-      />
-    ),
-    inventory: (
-      <Inventory 
-        onBack={() => setActivePage('dashboard')} 
-        stock={stock} 
-        setStock={setStock} 
-        onDeleteItem={handleDelete}
-        onInventoryEntry={handleSaveInventory} 
-      />
-    ),
-    production: (
-      <ProductionManager 
-        onBack={() => setActivePage('dashboard')} 
-        stock={stock} 
-        setStock={setStock} 
-        onSaveProduction={handleSaveProduction} 
-      />
-    )
+      case 'PurchasesManager': 
+        return <PurchasesManager {...props} onSave={handleSavePurchase} onPurchaseComplete={handleSavePurchase} onOrderTrigger={(o) => setSupplierWaitingList(prev => [...prev, o])} />;
+      
+      case 'Sales': 
+        return <Sales {...props} onSaveSales={(s) => setSalesData(prev => [...prev, s])} />;
+      
+      case 'ProductionManager': 
+        return <ProductionManager {...props} onSaveProduction={(p) => setProductionData(prev => [...prev, p])} />;
+      
+      case 'Inventory': 
+        return <Inventory {...props} categories={stock} onSave={handleSavePurchase} onAddItem={(item) => setStock(prev => [...prev, item])} />;
+      
+      case 'Waste': 
+        return <Waste {...props} onSaveWaste={(w) => setWaste(prev => [...prev, w])} />;
+      
+      case 'Expenses': 
+        return <Expenses {...props} onSave={(e) => setExpenses(prev => [...prev, e])} />;
+      
+      case 'Suppliers': 
+        return <Suppliers {...props} onSaveSupplier={(sup) => setSuppliers(prev => (typeof sup === 'function' ? sup(prev) : [...prev, sup]))} />;
+      
+      case 'Financials': 
+        return <Financials {...props} stats={financialStats} onSaveTransaction={(t) => setCashBook(prev => [...prev, t])} />;
+      
+      case 'Reports': 
+        return <Reports {...props} productionHistory={productionData} stats={financialStats} />;
+      
+      case 'Customers': 
+        return <Customers {...props} onSaveCustomer={(c) => setCustomers(prev => (typeof c === 'function' ? c(prev) : [...prev, c]))} />;
+      
+      case 'StaffManagement': 
+        return <StaffManagement {...props} onUpdateStaff={(st) => setStaff(st)} />;
+      
+      case 'Settings': 
+        return <Settings {...props} />;
+      
+      default: 
+        return <Dashboard setActivePage={setActivePage} stats={financialStats} staffCount={staff.length} />;
+    }
   };
 
   return (
-    <div style={{ direction: 'rtl', minHeight: '100vh', backgroundColor: '#f4f7fe', fontFamily: 'Tajawal, sans-serif' }}>
+    <div className="app-container" style={{ direction: 'rtl', fontFamily: "'Tajawal', sans-serif" }}>
       {isSyncing && (
         <div style={{ position: 'fixed', top: 10, left: 10, zIndex: 1000, fontSize: '10px', color: '#2563eb', background: '#fff', padding: '2px 8px', borderRadius: '10px', boxShadow: '0 2px 5px rgba(0,0,0,0.1)' }}>
-          🔄 جاري المزامنة...
+          🔄 جاري المزامنة مع السيرفر...
         </div>
       )}
+      
+      <main className="main-content">{renderPage()}</main>
 
-      <main style={{ padding: '16px', paddingBottom: '100px' }}>
-        {pages[activePage] || pages.dashboard}
-      </main>
-
-      <nav style={{
-        position: 'fixed', bottom: '15px', left: '15px', right: '15px',
-        height: '70px', backgroundColor: 'rgba(255, 255, 255, 0.9)',
-        backdropFilter: 'blur(15px)', borderRadius: '25px',
-        display: 'flex', justifyContent: 'space-around', alignItems: 'center',
-        boxShadow: '0 8px 32px rgba(0,0,0,0.1)', border: '1px solid rgba(255,255,255,0.3)',
-        zIndex: 1000
-      }}>
-        <NavButton active={activePage === 'dashboard'} icon="📊" label="الرئيسية" onClick={() => setActivePage('dashboard')} />
-        <NavButton active={activePage === 'production'} icon="🏭" label="الإنتاج" onClick={() => setActivePage('production')} />
-        <NavButton active={activePage === 'inventory'} icon="📦" label="المخزن" onClick={() => setActivePage('inventory')} />
+      <nav className="bottom-nav">
+        {[
+          { id: 'dashboard', label: 'الرئيسية' },
+          { id: 'Inventory', label: 'المخزن' },
+          { id: 'PurchasesManager', label: 'المشتريات' },
+          { id: 'Reports', label: 'التقارير' }
+        ].map(item => (
+          <button 
+            key={item.id} 
+            className={`nav-item ${activePage === item.id ? 'active' : ''}`} 
+            onClick={() => setActivePage(item.id)}
+          >
+            <span className="nav-label">{item.label}</span>
+          </button>
+        ))}
       </nav>
     </div>
   );
 };
-
-const NavButton = ({ active, icon, label, onClick, color }) => (
-  <button onClick={onClick} style={{
-    border: 'none', background: 'none', display: 'flex', flexDirection: 'column',
-    alignItems: 'center', color: color || (active ? '#2563eb' : '#94a3b8'), transition: '0.3s', cursor: 'pointer'
-  }}>
-    <span style={{ fontSize: '20px' }}>{icon}</span>
-    <span style={{ fontSize: '12px', fontWeight: active ? 'bold' : 'normal' }}>{label}</span>
-  </button>
-);
 
 export default App;
