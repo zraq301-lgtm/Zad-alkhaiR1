@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
 import { Package, Truck, Archive } from 'lucide-react';
 
-import RawMaterials from './page/RawMaterials';
-import SupplyEntry from './page/SupplyEntry';
-import FinishedProducts from './page/FinishedProducts';
+// تعديل المسارات بناءً على أسماء الملفات وهيكلتها في الصورة المرفقة
+import RawMaterials from './RawMaterials';
+import SupplyEntry from './SupplyEntry';
+import FinishedProducts from './FinishedProducts';
 
 // تم ضبط المكون لاستلام الدوال المطلوبة لضمان الربط الكامل مع المحرك الرئيسي
 const Inventory = ({ stock = [], onDeleteItem, onInventoryEntry }) => {
